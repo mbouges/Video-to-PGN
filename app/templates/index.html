@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video to PGN — Convert Chess Videos to PGN</title>
+    <meta name="description" content="Convert YouTube chess videos to PGN notation automatically using AI-powered analysis.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>♞</text></svg>">
+</head>
+<body>
+    <!-- Decorative background elements -->
+    <div class="bg-decoration">
+        <div class="bg-glow bg-glow--1"></div>
+        <div class="bg-glow bg-glow--2"></div>
+        <div class="bg-chess-pattern"></div>
+    </div>
+
+    <div class="app-container">
+
+        <!-- ═══════════════════════════════════════ HEADER ═══════════════════════════════════════ -->
+        <header class="header">
+            <div class="header__brand">
+                <div class="header__icon-wrapper">
+                    <span class="header__icon">♞</span>
+                </div>
+                <div class="header__text">
+                    <h1 class="header__title">Video to PGN</h1>
+                    <p class="header__tagline">Convert YouTube chess videos to PGN files</p>
+                </div>
+            </div>
+        </header>
+
+        <!-- ═══════════════════════════════════════ MAIN ═══════════════════════════════════════ -->
+        <main class="main">
+
+            <!-- ─────────────────── INPUT SECTION ─────────────────── -->
+            <section id="input-section" class="section section--input">
+                <div class="card card--input">
+                    <div class="card__header">
+                        <h2 class="card__title">
+                            <span class="card__title-icon">▶</span>
+                            Paste a YouTube URL
+                        </h2>
+                        <p class="card__subtitle">We'll extract every chess game and generate PGN notation automatically.</p>
+                    </div>
+
+                    <form id="url-form" class="url-form" autocomplete="off">
+                        <div class="url-form__input-wrapper">
+                            <div class="url-form__icon">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                                    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                                </svg>
+                            </div>
+                            <input
+                                type="url"
+                                id="url-input"
+                                class="url-form__input"
+                                placeholder="Paste YouTube URL here..."
+                                spellcheck="false"
+                                required
+                            >
+                            <div class="url-form__clear" id="url-clear" title="Clear" aria-label="Clear input">×</div>
+                        </div>
+                        <div class="url-form__error" id="url-error" role="alert"></div>
+                        <button type="submit" id="convert-btn" class="btn btn--primary btn--lg">
+                            <span class="btn__icon">♟</span>
+                            <span class="btn__text">Convert</span>
+                            <span class="btn__loader" aria-hidden="true"></span>
+                        </button>
+                    </form>
+
+                    <div class="card__hints">
+                        <span class="hint">Supports youtube.com and youtu.be links</span>
+                        <span class="hint-divider">·</span>
+                        <span class="hint">Multiple games auto-detected</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ─────────────────── PROCESSING SECTION ─────────────────── -->
+            <section id="processing-section" class="section section--processing hidden">
+                <div class="card card--processing">
+                    <div class="card__header">
+                        <h2 class="card__title">
+                            <span class="processing-spinner">♞</span>
+                            Processing Video
+                        </h2>
+                        <p class="card__subtitle" id="processing-subtitle">Hang tight — we're analyzing your video.</p>
+                    </div>
+
+                    <!-- Overall progress -->
+                    <div class="overall-progress">
+                        <div class="overall-progress__bar-track">
+                            <div class="overall-progress__bar-fill" id="overall-progress-fill"></div>
+                        </div>
+                        <span class="overall-progress__label" id="overall-progress-label">0%</span>
+                    </div>
+
+                    <!-- Stage list -->
+                    <ol class="stages">
+                        <!-- Stage 1: Downloading -->
+                        <li class="stage" id="stage-downloading" data-stage="downloading">
+                            <div class="stage__indicator">
+                                <span class="stage__icon">⬇️</span>
+                                <span class="stage__check">✓</span>
+                            </div>
+                            <div class="stage__content">
+                                <div class="stage__header">
+                                    <span class="stage__label">Downloading video</span>
+                                    <span class="stage__percent" id="stage-downloading-percent"></span>
+                                </div>
+                                <div class="stage__bar-track">
+                                    <div class="stage__bar-fill" id="stage-downloading-bar"></div>
+                                </div>
+                                <p class="stage__message" id="stage-downloading-message">Waiting...</p>
+                            </div>
+                        </li>
+
+                        <!-- Stage 2: Segmenting -->
+                        <li class="stage" id="stage-segmenting" data-stage="segmenting">
+                            <div class="stage__indicator">
+                                <span class="stage__icon">🎮</span>
+                                <span class="stage__check">✓</span>
+                            </div>
+                            <div class="stage__content">
+                                <div class="stage__header">
+                                    <span class="stage__label">Detecting games</span>
+                                    <span class="stage__percent" id="stage-segmenting-percent"></span>
+                                </div>
+                                <div class="stage__bar-track">
+                                    <div class="stage__bar-fill" id="stage-segmenting-bar"></div>
+                                </div>
+                                <p class="stage__message" id="stage-segmenting-message">Waiting...</p>
+                            </div>
+                        </li>
+
+                        <!-- Stage 3: Analyzing -->
+                        <li class="stage" id="stage-analyzing" data-stage="analyzing">
+                            <div class="stage__indicator">
+                                <span class="stage__icon">♟️</span>
+                                <span class="stage__check">✓</span>
+                            </div>
+                            <div class="stage__content">
+                                <div class="stage__header">
+                                    <span class="stage__label">Analyzing positions</span>
+                                    <span class="stage__percent" id="stage-analyzing-percent"></span>
+                                </div>
+                                <div class="stage__bar-track">
+                                    <div class="stage__bar-fill" id="stage-analyzing-bar"></div>
+                                </div>
+                                <p class="stage__message" id="stage-analyzing-message">Waiting...</p>
+                            </div>
+                        </li>
+
+                        <!-- Stage 4: Generating -->
+                        <li class="stage" id="stage-generating" data-stage="generating">
+                            <div class="stage__indicator">
+                                <span class="stage__icon">📝</span>
+                                <span class="stage__check">✓</span>
+                            </div>
+                            <div class="stage__content">
+                                <div class="stage__header">
+                                    <span class="stage__label">Generating PGN files</span>
+                                    <span class="stage__percent" id="stage-generating-percent"></span>
+                                </div>
+                                <div class="stage__bar-track">
+                                    <div class="stage__bar-fill" id="stage-generating-bar"></div>
+                                </div>
+                                <p class="stage__message" id="stage-generating-message">Waiting...</p>
+                            </div>
+                        </li>
+                    </ol>
+
+                    <button type="button" id="cancel-btn" class="btn btn--outline btn--sm">
+                        Cancel
+                    </button>
+                </div>
+            </section>
+
+            <!-- ─────────────────── ERROR SECTION ─────────────────── -->
+            <section id="error-section" class="section section--error hidden">
+                <div class="card card--error">
+                    <div class="error-display">
+                        <div class="error-display__icon">✕</div>
+                        <h2 class="error-display__title">Something went wrong</h2>
+                        <p class="error-display__message" id="error-message">An unexpected error occurred.</p>
+                        <div class="error-display__actions">
+                            <button type="button" id="retry-btn" class="btn btn--primary">
+                                <span class="btn__icon">↻</span>
+                                <span class="btn__text">Retry</span>
+                            </button>
+                            <button type="button" id="error-new-btn" class="btn btn--outline">
+                                <span class="btn__text">New Conversion</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ─────────────────── RESULTS SECTION ─────────────────── -->
+            <section id="results-section" class="section section--results hidden">
+                <div class="results">
+                    <!-- Results header -->
+                    <div class="results__header">
+                        <div class="results__summary">
+                            <div class="results__check-icon">
+                                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="20 6 9 17 4 12"/>
+                                </svg>
+                            </div>
+                            <div>
+                                <h2 class="results__title" id="results-title">Games extracted successfully</h2>
+                                <p class="results__subtitle" id="results-subtitle">Your PGN files are ready to download.</p>
+                            </div>
+                        </div>
+                        <div class="results__actions">
+                            <button type="button" id="download-all-btn" class="btn btn--primary">
+                                <span class="btn__icon">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                        <polyline points="7 10 12 15 17 10"/>
+                                        <line x1="12" y1="15" x2="12" y2="3"/>
+                                    </svg>
+                                </span>
+                                <span class="btn__text">Download All PGNs</span>
+                            </button>
+                            <button type="button" id="new-conversion-btn" class="btn btn--outline">
+                                <span class="btn__icon">+</span>
+                                <span class="btn__text">New Conversion</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Game cards grid -->
+                    <div class="games-grid" id="games-grid">
+                        <!-- Game cards inserted dynamically by JS -->
+                    </div>
+                </div>
+            </section>
+
+        </main>
+
+        <!-- ═══════════════════════════════════════ FOOTER ═══════════════════════════════════════ -->
+        <footer class="footer">
+            <div class="footer__content">
+                <p class="footer__text">
+                    <span class="footer__icon">♞</span>
+                    Video to PGN — AI-powered chess video analysis
+                </p>
+                <div class="footer__links">
+                    <a href="https://github.com" class="footer__link" target="_blank" rel="noopener">GitHub</a>
+                    <span class="footer__divider">·</span>
+                    <a href="https://lichess.org" class="footer__link" target="_blank" rel="noopener">Lichess</a>
+                    <span class="footer__divider">·</span>
+                    <a href="https://chess.com" class="footer__link" target="_blank" rel="noopener">Chess.com</a>
+                </div>
+            </div>
+        </footer>
+
+    </div>
+
+    <!-- Toast container for notifications -->
+    <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
