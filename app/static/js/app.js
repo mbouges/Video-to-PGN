@@ -326,7 +326,7 @@
     }
 
     function createGameCard(game, index) {
-        const { game_num, result, pgn, moves_count } = game;
+        const { game_number, result, pgn, moves_count } = game;
 
         const resultClass = getResultClass(result);
         const pgnPreview = (pgn || '').slice(0, 200);
@@ -338,14 +338,14 @@
         card.innerHTML = `
             <div class="game-card__header">
                 <div class="game-card__info">
-                    <span class="game-card__number">Game ${game_num}</span>
+                    <span class="game-card__number">Game ${game_number}</span>
                     <span class="game-card__moves">${moves_count} move${moves_count !== 1 ? 's' : ''}</span>
                 </div>
                 <span class="result-badge result-badge--${resultClass}">${escapeHtml(result || '?')}</span>
             </div>
             <div class="game-card__pgn">${escapeHtml(pgnPreview)}</div>
             <div class="game-card__actions">
-                <button class="btn btn--primary btn--sm btn-download" data-game="${game_num}" title="Download PGN">
+                <button class="btn btn--primary btn--sm btn-download" data-game="${game_number}" title="Download PGN">
                     <span class="btn__icon">
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -365,7 +365,7 @@
         `;
 
         // Event listeners
-        card.querySelector('.btn-download').addEventListener('click', () => downloadGame(game_num));
+        card.querySelector('.btn-download').addEventListener('click', () => downloadGame(game_number));
         card.querySelector('.btn-copy').addEventListener('click', (e) => copyPgn(e.currentTarget, pgn));
         card.querySelector('.btn-lichess').addEventListener('click', () => openInLichess(pgn));
 

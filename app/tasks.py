@@ -146,6 +146,36 @@ def is_starting_like(fen: str) -> bool:
     return get_piece_changes(fen, _STARTING_FEN) <= 6
 
 
+def _debounce_fens(fens: list[Optional[str]]) -> list[Optional[str]]:
+    """Remove single-frame classification noise/glitches using a 3-frame window."""
+    if len(fens) < 3:
+        return fens
+        
+    cleaned = list(fens)
+    n = len(fens)
+    for i in range(1, n - 1):
+        prev_f = cleaned[i - 1]
+        curr_f = cleaned[i]
+        next_f = cleaned[i + 1]
+        
+        if curr_f is None:
+            # If it was temporarily None (hidden), but neighbors are the same and not None, restore it
+            if prev_f is not None and next_f is not None and prev_f == next_f:
+                cleaned[i] = prev_f
+            continue
+            
+        # If curr_f is a FEN, but both neighbors are close to each other and different from curr_f
+        if prev_f is not None and next_f is not None:
+            diff_prev = get_piece_changes(prev_f, curr_f)
+            diff_next = get_piece_changes(curr_f, next_f)
+            diff_outer = get_piece_changes(prev_f, next_f)
+            
+            # If current frame is very different from both neighbors, but neighbors are close to each other
+            if diff_prev > 10 and diff_next > 10 and diff_outer <= 4:
+                cleaned[i] = prev_f
+    return cleaned
+
+
 def _segment_games_from_fens(
     fens: list[Optional[str]],
     timestamps: list[float],
@@ -304,6 +334,16 @@ async def _process_video(job_id: str, url: str) -> None:
             progress_callback=on_classify_progress,
         )
 
+        # Save raw FEN classifications for debugging
+        try:
+            import json
+            fens_path = output_dir / "fens.json"
+            with open(fens_path, "w") as f:
+                json.dump({"timestamps": timestamps, "fens": all_fens}, f, indent=2)
+            logger.info(f"[{job_id}] Saved raw FEN classifications to {fens_path}")
+        except Exception as err:
+            logger.warning(f"[{job_id}] Failed to save FEN classifications: {err}")
+
         # Count how many frames had visible boards
         visible_count = sum(1 for f in all_fens if f is not None)
         logger.info(
@@ -317,17 +357,13 @@ async def _process_video(job_id: str, url: str) -> None:
                 "The board may not be visible or the video format is unsupported."
             )
 
-        # --- Stage 4: Segment into Games & Build PGNs ---
-        game_segments = _segment_games_from_fens(all_fens, timestamps)
-        total_games = len(game_segments)
-        logger.info(f"[{job_id}] Found {total_games} game(s)")
+        # Debounce/smooth FENs to eliminate single-frame classification glitches
+        debounced_fens = _debounce_fens(all_fens)
 
-        if total_games == 0:
-            raise RuntimeError(
-                f"Detected {visible_count} board positions but could not "
-                "identify any complete games. The video may contain a single "
-                "ongoing game or non-standard content."
-            )
+        # --- Stage 4: Segment into Games & Build PGNs ---
+        game_segments = _segment_games_from_fens(debounced_fens, timestamps)
+        total_games = len(game_segments)
+        logger.info(f"[{job_id}] Found {total_games} game(s) before filtering")
 
         all_game_results: list[GameResult] = []
 
@@ -346,10 +382,20 @@ async def _process_video(job_id: str, url: str) -> None:
             # Detect moves from FEN sequence
             move_sequence = build_move_sequence(game_fens)
 
-            if not move_sequence.moves:
-                logger.warning(
-                    f"[{job_id}] Game {game_num}: no moves detected "
-                    f"from {len(game_fens)} FENs"
+            # 1. Skip segments that are too short (likely reviews or static noise)
+            if len(move_sequence.moves) < 4:
+                logger.info(
+                    f"[{job_id}] Skipping Game {game_num}: too few moves "
+                    f"({len(move_sequence.moves)} moves). Likely a review or static frame."
+                )
+                continue
+
+            # 2. Skip segments with high error-to-move ratio (likely reviews or incorrect orientation)
+            if len(move_sequence.errors) >= len(move_sequence.moves):
+                logger.info(
+                    f"[{job_id}] Skipping Game {game_num}: too many move errors "
+                    f"({len(move_sequence.errors)} errors for {len(move_sequence.moves)} moves). "
+                    f"Likely a review/analysis jump or mirrored board."
                 )
                 continue
 
@@ -360,11 +406,13 @@ async def _process_video(job_id: str, url: str) -> None:
             except Exception:
                 board_result = "*"
 
+            game_number = len(all_game_results) + 1
+
             metadata = GameMetadata(
                 event=download_result.title or "YouTube Video",
                 site="Chess.com",
                 date="????.??.??",
-                round_num=str(game_num),
+                round_num=str(game_number),
                 white="?",
                 black="?",
                 result=board_result if board_result != "*" else "*",
@@ -374,11 +422,11 @@ async def _process_video(job_id: str, url: str) -> None:
             pgn_string = build_pgn(move_sequence.moves, metadata)
 
             # Save individual PGN file
-            pgn_path = output_dir / f"game_{game_num}.pgn"
+            pgn_path = output_dir / f"game_{game_number}.pgn"
             save_pgn(pgn_string, str(pgn_path))
 
             game_result = GameResult(
-                game_number=game_num,
+                game_number=game_number,
                 result=metadata.result,
                 moves_count=len(move_sequence.moves),
                 pgn=pgn_string,
@@ -386,8 +434,15 @@ async def _process_video(job_id: str, url: str) -> None:
             all_game_results.append(game_result)
 
             logger.info(
-                f"[{job_id}] Game {game_num}: {len(move_sequence.moves)} moves, "
-                f"result={metadata.result}, {len(move_sequence.errors)} errors"
+                f"[{job_id}] Game {game_number} (original segment {game_num}): "
+                f"{len(move_sequence.moves)} moves, result={metadata.result}, "
+                f"{len(move_sequence.errors)} errors"
+            )
+
+        if not all_game_results:
+            raise RuntimeError(
+                f"Detected {visible_count} board positions but could not "
+                "identify any complete games after filtering out short segments and reviews."
             )
 
         # --- Stage 5: Complete ---

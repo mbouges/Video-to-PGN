@@ -10,6 +10,7 @@ import asyncio
 import logging
 import json
 import cv2
+import numpy as np
 from typing import Optional
 
 from google import genai
@@ -118,6 +119,21 @@ async def classify_frame(
         return None
         
     cropped = img[_BOARD_TOP:_BOARD_BOTTOM, _BOARD_LEFT:_BOARD_RIGHT]
+    
+    # 1. Local pre-filter check: verify chess board grid is present
+    try:
+        gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blurred, 30, 100)
+        
+        h_proj = np.sum(edges, axis=1)
+        v_proj = np.sum(edges, axis=0)
+        
+        if np.std(h_proj) < 5000 or np.std(v_proj) < 5000:
+            logger.info("Local grid check failed (no board visible) for %s", frame_path)
+            return None
+    except Exception as e:
+        logger.warning("Local board grid check failed for %s: %s", frame_path, e)
     
     # Generate the grid-labeled image bytes
     labeled_bytes = _draw_grid_lines_with_labels(cropped)

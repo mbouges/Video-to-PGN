@@ -21,7 +21,7 @@ class Settings(BaseSettings):
 
     # Frame sampling settings
     sample_interval_seconds: float = 3.0  # one frame every N seconds
-    dedup_threshold: int = 20  # perceptual hash hamming distance for dedup
+    dedup_threshold: int = 5  # perceptual hash hamming distance for dedup
 
     # Gemini Vision settings
     gemini_model: str = "gemini-2.5-flash"
