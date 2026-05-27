@@ -116,7 +116,7 @@ def detect_move_fuzzy(
     fen_before: str,
     fen_after: str,
     board: chess.Board,
-    max_diff: int = 5,
+    max_diff: int = 6,
 ) -> tuple[Optional[chess.Move], int, bool]:
     """Find the legal move that turns *board* into a state closest to *fen_after*.
 
@@ -236,6 +236,16 @@ def build_move_sequence(
             idx += 1
             continue
 
+        # If the target FEN is drastically different (>25 squares), it's almost certainly a
+        # review/analysis frame or bad AI classification — not a legal game continuation.
+        # Silently skip it without recording an error to preserve a clean error count.
+        if curr_diff > 25:
+            logger.debug(
+                "Silently skipping review/garbage FEN (diff=%d > 25): %s", curr_diff, target
+            )
+            idx += 1
+            continue
+
         # Could not find a legal move. Record error and try to skip ahead.
         error_info = {
             "from_fen": current_placement,
@@ -246,18 +256,24 @@ def build_move_sequence(
         result.errors.append(error_info)
 
         # Attempt to resync: look ahead for a FEN that *is* reachable (fuzzy match).
+        # Increased from 3 to 8 frames (~24s at 3s sampling) to handle longer AI confusion runs.
         resolved = False
-        for lookahead in range(1, min(4, len(unique_fens) - idx)):
+        for lookahead in range(1, min(9, len(unique_fens) - idx)):
             next_target = unique_fens[idx + lookahead]
-            
+
             next_diff = get_piece_changes(current_placement, next_target)
             if next_diff <= 3:
                 idx = idx + lookahead + 1
                 resolved = True
-                logger.info("Re-synced by skipping %d FEN(s) ahead (position matches current board)", lookahead)
+                logger.info(
+                    "Re-synced by skipping %d FEN(s) ahead (position matches current board)",
+                    lookahead,
+                )
                 break
 
-            skip_move, skip_diff, skip_toggled = detect_move_fuzzy(current_placement, next_target, board)
+            skip_move, skip_diff, skip_toggled = detect_move_fuzzy(
+                current_placement, next_target, board
+            )
             if skip_move is not None:
                 if skip_toggled:
                     logger.info("Turn toggled to resolve skip-transition to: %s", next_target)
@@ -265,8 +281,35 @@ def build_move_sequence(
                 result.moves.append(skip_move)
                 idx = idx + lookahead + 1
                 resolved = True
-                logger.info("Re-synced by skipping %d FEN(s) ahead (found legal move)", lookahead)
+                logger.info(
+                    "Re-synced by skipping %d FEN(s) ahead (found legal move)", lookahead
+                )
                 break
+
+        if not resolved and curr_diff <= 20:
+            # Last resort: try 2-move deep search — play a move, then check if a second
+            # move from that position can reach any upcoming FEN. Handles 2+ consecutive
+            # AI misclassification frames without desynchronising.
+            # Only triggered when the position mismatch is plausible (not a garbage FEN).
+            for move1 in list(board.legal_moves)[:20]:  # limit branching factor
+                board.push(move1)
+                after1 = _placement(board)
+                for lookahead in range(1, min(4, len(unique_fens) - idx)):
+                    next_target = unique_fens[idx + lookahead]
+                    skip2, diff2, toggled2 = detect_move_fuzzy(after1, next_target, board)
+                    if skip2 is not None:
+                        board.push(skip2)
+                        result.moves.extend([move1, skip2])
+                        idx = idx + lookahead + 1
+                        resolved = True
+                        logger.info(
+                            "Re-synced via 2-move deep search, skipping %d FEN(s) ahead",
+                            lookahead,
+                        )
+                        break
+                if resolved:
+                    break
+                board.pop()
 
         if not resolved:
             # Give up on this transition and advance.

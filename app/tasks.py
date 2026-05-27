@@ -147,32 +147,65 @@ def is_starting_like(fen: str) -> bool:
 
 
 def _debounce_fens(fens: list[Optional[str]]) -> list[Optional[str]]:
-    """Remove single-frame classification noise/glitches using a 3-frame window."""
+    """Remove classification noise/glitches using a 5-frame sliding window.
+
+    Extended from 3-frame to 5-frame window so that runs of 2 bad consecutive
+    AI reads (which happen with review/analysis frames) are also smoothed out.
+    """
     if len(fens) < 3:
         return fens
-        
+
     cleaned = list(fens)
     n = len(fens)
+
+    # First pass: standard 3-frame glitch removal
     for i in range(1, n - 1):
         prev_f = cleaned[i - 1]
         curr_f = cleaned[i]
         next_f = cleaned[i + 1]
-        
+
         if curr_f is None:
             # If it was temporarily None (hidden), but neighbors are the same and not None, restore it
             if prev_f is not None and next_f is not None and prev_f == next_f:
                 cleaned[i] = prev_f
             continue
-            
+
         # If curr_f is a FEN, but both neighbors are close to each other and different from curr_f
         if prev_f is not None and next_f is not None:
             diff_prev = get_piece_changes(prev_f, curr_f)
             diff_next = get_piece_changes(curr_f, next_f)
             diff_outer = get_piece_changes(prev_f, next_f)
-            
+
             # If current frame is very different from both neighbors, but neighbors are close to each other
             if diff_prev > 10 and diff_next > 10 and diff_outer <= 4:
                 cleaned[i] = prev_f
+
+    # Second pass: 5-frame outlier removal
+    # Replace frames that are far from the median of their 5-frame window
+    for i in range(2, n - 2):
+        curr_f = cleaned[i]
+        if curr_f is None:
+            continue
+
+        window = [cleaned[j] for j in range(i - 2, i + 3) if cleaned[j] is not None]
+        if len(window) < 4:
+            continue
+
+        # Count how many window frames are close to each other (within 4 squares)
+        # Find the "consensus" position: the one closest to the most others
+        diffs_to_others = []
+        for j, w in enumerate(window):
+            if w == curr_f:
+                continue
+            diffs_to_others.append(get_piece_changes(curr_f, w))
+
+        if diffs_to_others and all(d > 12 for d in diffs_to_others):
+            # curr_f is very different from all its neighbors — likely a bad classification
+            # Replace with the previous clean frame
+            if cleaned[i - 1] is not None:
+                cleaned[i] = cleaned[i - 1]
+                logger.debug("5-frame debounce: replaced outlier frame %d", i)
+
     return cleaned
 
 
@@ -237,6 +270,83 @@ def _segment_games_from_fens(
         })
         
     return games
+
+
+def _merge_adjacent_segments(games: list[dict], all_fens: list[Optional[str]], timestamps: list[float]) -> list[dict]:
+    """Merge segments that were incorrectly split by brief AI classification errors.
+
+    Two adjacent segments are merged when:
+    - They are separated by <= 5 null/gap frames in the original FEN sequence
+    - The end of segment N is within 12 squares of the start of segment N+1
+      (i.e., the board position is plausibly continuous)
+    - Neither segment starts from the standard starting position
+      (if seg N+1 starts from opening, it's a genuine new game)
+
+    This repairs the common failure where 2-3 consecutive bad AI reads cause
+    the segmenter to treat one game as two halves.
+    """
+    if len(games) <= 1:
+        return games
+
+    # Build a timestamp->index lookup for fast gap calculation
+    ts_to_idx = {ts: i for i, ts in enumerate(timestamps)}
+
+    merged = []
+    i = 0
+    while i < len(games):
+        current = games[i]
+        if i + 1 >= len(games):
+            merged.append(current)
+            i += 1
+            continue
+
+        next_seg = games[i + 1]
+
+        # Don't merge if next segment starts from the standard opening
+        # (that's a genuine new game boundary)
+        if is_starting_like(next_seg["fens"][0]):
+            merged.append(current)
+            i += 1
+            continue
+
+        # Calculate the gap between the two segments (frames between end_time and start_time)
+        end_ts = current["end_time"]
+        start_ts = next_seg["start_time"]
+        gap_seconds = start_ts - end_ts
+
+        # Only merge if the gap is small (within ~15 seconds = ~5 frames at 3s sampling)
+        if gap_seconds > 15:
+            merged.append(current)
+            i += 1
+            continue
+
+        # Check positional continuity: end of current segment vs start of next
+        end_fen = current["fens"][-1]
+        start_fen = next_seg["fens"][0]
+        position_diff = get_piece_changes(end_fen, start_fen)
+
+        if position_diff <= 12:
+            # Merge the two segments
+            combined_fens = current["fens"] + next_seg["fens"]
+            merged_seg = {
+                "fens": combined_fens,
+                "start_time": current["start_time"],
+                "end_time": next_seg["end_time"],
+            }
+            logger.info(
+                "Merged segments: %.0fs-%.0fs + %.0fs-%.0fs (gap=%.0fs, pos_diff=%d)",
+                current["start_time"], current["end_time"],
+                next_seg["start_time"], next_seg["end_time"],
+                gap_seconds, position_diff,
+            )
+            games[i + 1] = merged_seg  # Replace next with merged, skip current
+            i += 1
+            continue
+
+        merged.append(current)
+        i += 1
+
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -362,8 +472,12 @@ async def _process_video(job_id: str, url: str) -> None:
 
         # --- Stage 4: Segment into Games & Build PGNs ---
         game_segments = _segment_games_from_fens(debounced_fens, timestamps)
+        logger.info(f"[{job_id}] Found {len(game_segments)} raw segment(s) before merging")
+
+        # Merge segments that were split by brief AI classification errors
+        game_segments = _merge_adjacent_segments(game_segments, debounced_fens, timestamps)
         total_games = len(game_segments)
-        logger.info(f"[{job_id}] Found {total_games} game(s) before filtering")
+        logger.info(f"[{job_id}] Found {total_games} segment(s) after merging, before filtering")
 
         all_game_results: list[GameResult] = []
 
@@ -381,20 +495,33 @@ async def _process_video(job_id: str, url: str) -> None:
 
             # Detect moves from FEN sequence
             move_sequence = build_move_sequence(game_fens)
+            n_moves = len(move_sequence.moves)
+            n_errors = len(move_sequence.errors)
+            starts_from_opening = is_starting_like(game_fens[0])
+
+            logger.info(
+                f"[{job_id}] Segment {game_num}/{total_games}: "
+                f"{len(game_fens)} positions, {n_moves} moves, {n_errors} errors, "
+                f"time={game_data['start_time']:.0f}s-{game_data['end_time']:.0f}s, "
+                f"starts_from_opening={starts_from_opening}"
+            )
 
             # 1. Skip segments that are too short (likely reviews or static noise)
-            if len(move_sequence.moves) < 4:
+            # Relaxed from 4 to 2: even short game clips may be valid.
+            if n_moves < 2:
                 logger.info(
-                    f"[{job_id}] Skipping Game {game_num}: too few moves "
-                    f"({len(move_sequence.moves)} moves). Likely a review or static frame."
+                    f"[{job_id}] SKIP Segment {game_num}: too few moves ({n_moves}). "
+                    f"Likely a review or static frame."
                 )
                 continue
 
-            # 2. Skip segments with high error-to-move ratio (likely reviews or incorrect orientation)
-            if len(move_sequence.errors) >= len(move_sequence.moves):
+            # 2. Skip segments with overwhelmingly high error-to-move ratio.
+            # Relaxed from 1:1 to 2:1 (errors must be 2x moves to reject).
+            # Given AI noise, some errors in a real game are expected.
+            if n_errors >= 2 * n_moves and n_moves < 5:
                 logger.info(
-                    f"[{job_id}] Skipping Game {game_num}: too many move errors "
-                    f"({len(move_sequence.errors)} errors for {len(move_sequence.moves)} moves). "
+                    f"[{job_id}] SKIP Segment {game_num}: too many errors "
+                    f"({n_errors} errors vs {n_moves} moves). "
                     f"Likely a review/analysis jump or mirrored board."
                 )
                 continue
@@ -434,15 +561,15 @@ async def _process_video(job_id: str, url: str) -> None:
             all_game_results.append(game_result)
 
             logger.info(
-                f"[{job_id}] Game {game_number} (original segment {game_num}): "
-                f"{len(move_sequence.moves)} moves, result={metadata.result}, "
-                f"{len(move_sequence.errors)} errors"
+                f"[{job_id}] ACCEPT Segment {game_num} as Game {game_number}: "
+                f"{n_moves} moves, {n_errors} errors, result={metadata.result}"
             )
 
         if not all_game_results:
             raise RuntimeError(
-                f"Detected {visible_count} board positions but could not "
-                "identify any complete games after filtering out short segments and reviews."
+                f"Detected {visible_count} board positions across {total_games} segment(s) "
+                f"but could not identify any complete games after filtering. "
+                f"Check the server logs for per-segment move/error counts to diagnose."
             )
 
         # --- Stage 5: Complete ---
