@@ -13,8 +13,10 @@ recorded and the detector attempts to re-synchronise by searching ahead.
 from __future__ import annotations
 
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
+
 
 import chess
 
@@ -32,6 +34,8 @@ class MoveSequence:
     moves: list[chess.Move] = field(default_factory=list)
     errors: list[dict[str, str]] = field(default_factory=list)
     board: chess.Board = field(default_factory=chess.Board)
+    starting_fen: Optional[str] = None
+
 
 
 class MoveDetectionError(Exception):
@@ -173,8 +177,126 @@ def detect_move_fuzzy(
 
 
 # ---------------------------------------------------------------------------
+# Multi-move path finding
+# ---------------------------------------------------------------------------
+
+
+def _expand_placement(fen: str) -> list[str]:
+    """Expand a FEN piece-placement string into a 64-element list."""
+    board: list[str] = []
+    for row in fen.split("/"):
+        for c in row:
+            if c.isdigit():
+                board.extend([""] * int(c))
+            else:
+                board.append(c)
+    return board
+
+
+def _differing_squares(fen1: str, fen2: str) -> set[int]:
+    """Return the set of square indices (0-63) that differ between two placements."""
+    b1 = _expand_placement(fen1)
+    b2 = _expand_placement(fen2)
+    return {i for i in range(64) if b1[i] != b2[i]}
+
+
+def _neighbours(sq: int) -> set[int]:
+    """Return squares within 1 king-step of *sq* (including *sq* itself)."""
+    r, c = divmod(sq, 8)
+    result = set()
+    for dr in (-1, 0, 1):
+        for dc in (-1, 0, 1):
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < 8 and 0 <= nc < 8:
+                result.add(nr * 8 + nc)
+    return result
+
+
+def _relevant_squares(diff: set[int]) -> set[int]:
+    """Expand *diff* by one king-step in every direction for move pruning."""
+    result = set()
+    for sq in diff:
+        result |= _neighbours(sq)
+    return result
+
+
+def detect_multi_move(
+    board: chess.Board,
+    target_fen: str,
+    max_depth: int = 4,
+    max_diff: int = 4,
+) -> Optional[list[chess.Move]]:
+    """Find a sequence of 2+ legal moves from the current board position
+    that reaches the target FEN (within *max_diff* squares).
+
+    Uses BFS with pruning: only explore moves that involve squares
+    that differ between current and target positions.
+
+    Returns ``None`` if no path is found within *max_depth* moves.
+    """
+    target = _normalise_placement(target_fen)
+    start_placement = _placement(board)
+    start_diff_count = get_piece_changes(start_placement, target)
+
+    if start_diff_count == 0:
+        return []  # already there
+
+    # Pre-compute the neighbourhood of differing squares for pruning.
+    global_diff = _differing_squares(start_placement, target)
+    relevant = _relevant_squares(global_diff)
+
+    _NODE_LIMIT = 5000
+    nodes_explored = 0
+
+    # Iterative deepening: try depth 2 first, then 3, … up to max_depth.
+    for depth_limit in range(2, max_depth + 1):
+        # BFS queue: each entry is (board_copy, move_path)
+        queue: deque[tuple[chess.Board, list[chess.Move]]] = deque()
+
+        queue.append((board.copy(), []))
+
+        while queue and nodes_explored < _NODE_LIMIT:
+            cur_board, path = queue.popleft()
+
+            if len(path) >= depth_limit:
+                continue
+
+            cur_placement = _placement(cur_board)
+            cur_diff_count = get_piece_changes(cur_placement, target)
+
+            for move in cur_board.legal_moves:
+                # Pruning: only consider moves touching relevant squares.
+                if move.from_square not in relevant and move.to_square not in relevant:
+                    continue
+
+                nodes_explored += 1
+                if nodes_explored >= _NODE_LIMIT:
+                    break
+
+                cur_board.push(move)
+                new_placement = _placement(cur_board)
+                new_diff = get_piece_changes(new_placement, target)
+                new_path = path + [move]
+
+                if new_diff <= max_diff:
+                    # Found an acceptable path — restore the original board state.
+                    cur_board.pop()
+                    return new_path
+
+                # Only keep exploring if the diff has decreased compared to
+                # the position we started the *move* from, to avoid divergence.
+                if new_diff < cur_diff_count and len(new_path) < depth_limit:
+                    queue.append((cur_board.copy(), new_path))
+
+                cur_board.pop()
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Sequence builder
 # ---------------------------------------------------------------------------
+
 
 
 def build_move_sequence(
@@ -208,7 +330,8 @@ def build_move_sequence(
             idx = 0
             logger.warning("Failed to parse custom starting FEN, defaulted to standard position")
 
-    result = MoveSequence(board=board)
+    result = MoveSequence(board=board, starting_fen=board.fen())
+
 
     logger.info(
         "Building move sequence from %d FENs (%d unique transitions)",
@@ -235,6 +358,17 @@ def build_move_sequence(
         if curr_diff <= 3:
             idx += 1
             continue
+
+        # Before recording error, try multi-move path finding
+        if curr_diff <= 16:  # Only for plausible multi-move transitions
+            multi_moves = detect_multi_move(board, target, max_depth=4)
+            if multi_moves:
+                for m in multi_moves:
+                    board.push(m)
+                    result.moves.append(m)
+                idx += 1
+                logger.info("Found %d-move path to reach target position", len(multi_moves))
+                continue
 
         # If the target FEN is drastically different (>25 squares), it's almost certainly a
         # review/analysis frame or bad AI classification — not a legal game continuation.

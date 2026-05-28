@@ -13,7 +13,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Optional
+from typing import Optional, Union
 
 import chess
 import chess.pgn
@@ -51,8 +51,21 @@ class PGNBuildError(Exception):
 def _create_game(
     moves: list[chess.Move],
     metadata: GameMetadata,
+    starting_fen: Optional[str] = None,
 ) -> chess.pgn.Game:
-    """Create a ``chess.pgn.Game`` from *moves* and *metadata*."""
+    """Create a ``chess.pgn.Game`` from *moves* and *metadata*.
+
+    Parameters
+    ----------
+    moves:
+        Ordered list of moves.
+    metadata:
+        Game metadata for PGN headers.
+    starting_fen:
+        Optional FEN string for a custom starting position.  When provided
+        the ``SetUp`` and ``FEN`` headers are added so that PGN consumers
+        know the game does not start from the standard position.
+    """
     game = chess.pgn.Game()
 
     # Set standard seven-tag roster headers.
@@ -68,9 +81,16 @@ def _create_game(
     if metadata.source_url:
         game.headers["SourceURL"] = metadata.source_url
 
+    # Custom starting position support.
+    if starting_fen is not None:
+        game.headers["SetUp"] = "1"
+        game.headers["FEN"] = starting_fen
+        board = chess.Board(starting_fen)
+    else:
+        board = game.board()
+
     # Replay moves onto the game node tree.
     node: chess.pgn.GameNode = game
-    board = game.board()
 
     for move in moves:
         if move not in board.legal_moves:
@@ -95,6 +115,7 @@ def _create_game(
 def build_pgn(
     moves: list[chess.Move],
     metadata: GameMetadata | None = None,
+    starting_fen: Optional[str] = None,
 ) -> str:
     """Build a PGN string for a single game.
 
@@ -104,6 +125,8 @@ def build_pgn(
         Ordered list of moves from the starting position.
     metadata:
         Optional game metadata; defaults are used when omitted.
+    starting_fen:
+        Optional FEN string for a custom starting position.
 
     Returns
     -------
@@ -113,7 +136,7 @@ def build_pgn(
     if metadata is None:
         metadata = GameMetadata()
 
-    game = _create_game(moves, metadata)
+    game = _create_game(moves, metadata, starting_fen=starting_fen)
 
     exporter = chess.pgn.StringExporter(headers=True, variations=False, comments=False)
     pgn_text: str = game.accept(exporter)
@@ -123,14 +146,20 @@ def build_pgn(
 
 
 def build_multi_game_pgn(
-    games: list[tuple[list[chess.Move], GameMetadata]],
+    games: list[
+        Union[
+            tuple[list[chess.Move], GameMetadata],
+            tuple[list[chess.Move], GameMetadata, Optional[str]],
+        ]
+    ],
 ) -> str:
     """Build a PGN string containing multiple games.
 
     Parameters
     ----------
     games:
-        List of ``(moves, metadata)`` tuples, one per game.
+        List of game tuples.  Each element may be either
+        ``(moves, metadata)`` or ``(moves, metadata, starting_fen)``.
 
     Returns
     -------
@@ -138,10 +167,15 @@ def build_multi_game_pgn(
         Combined PGN with games separated by blank lines.
     """
     parts: list[str] = []
-    for idx, (moves, meta) in enumerate(games, start=1):
+    for idx, game_tuple in enumerate(games, start=1):
+        if len(game_tuple) == 3:
+            moves, meta, fen = game_tuple  # type: ignore[misc]
+        else:
+            moves, meta = game_tuple  # type: ignore[misc]
+            fen = None
         if meta.round_num == "?":
             meta.round_num = str(idx)
-        parts.append(build_pgn(moves, meta))
+        parts.append(build_pgn(moves, meta, starting_fen=fen))
 
     combined = "\n\n".join(parts) + "\n"
     logger.info("Built multi-game PGN: %d game(s)", len(games))

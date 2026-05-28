@@ -546,7 +546,11 @@ async def _process_video(job_id: str, url: str) -> None:
                 source_url=url,
             )
 
-            pgn_string = build_pgn(move_sequence.moves, metadata)
+            pgn_string = build_pgn(
+                move_sequence.moves,
+                metadata,
+                starting_fen=move_sequence.starting_fen,
+            )
 
             # Save individual PGN file
             pgn_path = output_dir / f"game_{game_number}.pgn"
